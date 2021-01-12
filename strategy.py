@@ -2,10 +2,13 @@ import pandas as pd
 import numpy as np
 import math
 from keras.models import Sequential
-from keras.layers import Dense, Dropout
+from keras.layers import Dense, Dropout, LSTM
+from keras.optimizers import RMSprop
 from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
 from sklearn import preprocessing
 import matplotlib.pyplot as plt
+from sklearn.metrics import mean_squared_error, r2_score
 
 
 class Strategy:
@@ -67,13 +70,59 @@ class Strategy:
         self.rsi_metric()
         self.macd_metric()
         self.on_balance_volume()
-        self.simple_moving_average(5)
-        self.simple_moving_average(20)
-        self.exponential_moving_average(5)
-        self.exponential_moving_average(20)
-        self.data['SMA Distance'] = self.data['SMA_5'] - self.data['SMA_20']
-        self.data['EMA Distance'] = self.data['EMA_5'] - self.data['EMA_20']
-        self.data['Increase/Decrease'] = self.data['Close'].rolling(2).apply(lambda x: 1 if x.iloc[1] - x.iloc[0] > 0 else 0)
+        # EMA 50 will be the trend line used in the bayes calculation
+        self.exponential_moving_average(50)
+
+        # self.data['SMA Distance'] = self.data['SMA_5'] - self.data['SMA_20']
+        # self.data['EMA Distance'] = self.data['EMA_5'] - self.data['EMA_20']
+        self.data['temp'] = self.data['Close'].shift(-1)
+        self.data['Increase/Decrease'] = self.data.apply(lambda x: 1 if x['temp'] - x['Close'] > 0 else 0, axis=1)
+        self.data = self.data.drop(columns=['temp'])
+        return
+
+        # self.data['SMA Distance'] = self.data.apply(lambda x: 1 if x['SMA_5'] - x['SMA_20'] > 0 else 0, axis=1)
+        # self.data['EMA Distance'] = self.data.apply(lambda x: 1 if x['EMA_5'] - x['EMA_20'] > 0 else 0, axis=1)
+
+    def linear_regression_model(self):
+        temp_data = self.data[['Close', 'EMA_50']]
+        temp_data['EMA_50_Distance'] = (temp_data['Close'] - temp_data['EMA_50'])/temp_data['EMA_50']
+        temp_data['EMA_50_Slope'] = temp_data['EMA_50'].diff()
+        temp_data['EMA_50_Crossover_Count'] = np.nan
+        i = 1
+        trend = 1
+        for index, row in temp_data.iterrows():
+            if row['EMA_50_Slope'] > 0:
+                if trend == 1:
+                    i = i + 1
+                else:
+                    trend = 1
+                    i = 1
+            elif row['EMA_50_Slope'] < 0:
+                if trend == 0:
+                    row['EMA_50_Crossover_Count'] = i
+                    i = i + 1
+                else:
+                    trend = 0
+                    i = 1
+            temp_data.at[index, 'EMA_50_Crossover_Count'] = i
+        temp_data['temp'] = temp_data['EMA_50_Slope'].shift(-1)
+        temp_data['EMA_Increase_Decrease'] = temp_data.apply(lambda x: 1 if x['temp'] > 0 else 0, axis=1)
+        temp_data = temp_data.dropna()
+        temp_data = temp_data.drop(columns=['temp'])
+        X = temp_data[['EMA_50_Distance', 'EMA_50_Slope', 'EMA_50_Crossover_Count']]
+        y = temp_data['EMA_Increase_Decrease']
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33)
+
+        lr_model = LinearRegression().fit(X_train, y_train)
+        r_sq = lr_model.score(X_train, y_train)
+
+        predictions = lr_model.predict(X_test)
+        mse = mean_squared_error(y_test, predictions)
+        r2 = r2_score(y_test, predictions)
+
+
+        #Compute rolling window base probability
+        #Identify positive slope in EMA line from an inflection point
         return
 
     def rsi_metric(self, window=14):
@@ -118,38 +167,47 @@ class Strategy:
     def exponential_moving_average(self, span):
         self.data['EMA_{}'.format(span)] = self.data['Close'].ewm(span=span, adjust=False).mean()
 
-    def generate_neural_net(self):
+    def generate_neural_net(self, indicators, lookback=60, epochs=50):
         training_data = self.data.dropna()
-        X = training_data[['RSI',
-                           'On Balance Volume Derivative',
-                           'MACD_Decision',
-                           'SMA Distance',
-                           'EMA Distance']]
-        x = X.values
         min_max_scaler = preprocessing.MinMaxScaler()
-        x_scaled = min_max_scaler.fit_transform((x))
-        X = pd.DataFrame(x_scaled)
-        y = training_data['Increase/Decrease']
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33, random_state=42)
+        # x_scaled = min_max_scaler.fit_transform(training_data[indicators].values)
+        # X = np.array(x_scaled)
+        X = np.array(training_data[indicators].values)
+        y = np.array(training_data['EMA_Increase_Decrease'])
+
+        # Set up lookback data for LSTM. Currently set to 60 days
+        temp_X = []
+        for i in range(lookback, X.shape[0]+1):
+            temp_X.append(X[i - lookback:i, :])
+
+        # Reshape data for LSTM
+        X = np.array(temp_X)
+        # X = np.reshape(X, (X.shape[0], X.shape[1], 5))
+        y = y[lookback-1:]
+
+        # Training/Testing Data
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33)
+
+        # Create a model with keras
+        # create and fit the LSTM network
         model = Sequential()
-        model.add(Dense(12, input_dim=5, activation='relu'))
+        model.add(LSTM(64, input_shape=(lookback, X[0].shape[1]), return_sequences=True, activation='relu'))
         model.add(Dropout(0.2))
-        model.add(Dense(64, activation='relu'))
+        model.add(LSTM(12, activation='relu'))
         model.add(Dropout(0.2))
-        model.add(Dense(24, activation='relu'))
-        model.add(Dense(1, activation='sigmoid'))
+        model.add(Dense(1))
 
-        model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+        model.summary()
 
+        model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['acc'])
         # fit the keras model on the dataset
-        history = model.fit(X_train, y_train, validation_data=(X_test, y_test), epochs=50, batch_size=10)
-        self.graph_neural_network_results(history)
-        return
+        history = model.fit(X_train, y_train, validation_data=(X_test, y_test), epochs=epochs, batch_size=10)
+        return history
 
     def graph_neural_network_results(self, history):
-        plt.plot(history.history['accuracy'])
-        plt.plot(history.history['val_accuracy'])
+        plt.plot(history.history['acc'])
+        plt.plot(history.history['val_acc'])
         plt.title('model accuracy')
         plt.ylabel('accuracy')
         plt.xlabel('epoch')
