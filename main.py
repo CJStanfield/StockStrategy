@@ -31,10 +31,9 @@ if __name__ == '__main__':
                   'EMA_Increase_Decrease']
     indicators2 = ['MACD_Decision']
     data = get_stock_data(STOCK)
-    strategy = Strategy.Strategy(data)
+    strategy = Strategy.Strategy(data, close='Close', volume='Volume')
     strategy.generate_metrics()
     strategy.linear_regression_model()
-    plot(strategy.data, STOCK)
     # history = strategy.generate_neural_net(indicators=indicators2, lookback=30)
     # strategy.graph_neural_network_results(history)
 
