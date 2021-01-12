@@ -1,8 +1,8 @@
 import pandas as pd
 import numpy as np
 
-SMA = '{}_SMA_{}'
-EMA = '{}_EMA_{}'
+SMA = '{}_sma_{}'
+EMA = '{}_ema_{}'
 INCREASE_DECREASE = '{}_increase_decrease'
 DERIVATIVE = '{}_derivative'
 DISTANCE = '{}_{}_distance'
@@ -63,6 +63,7 @@ def macd_metric(data):
     data[MACD] = macd
     data[MACD_SIGNAL] = macd_signal
     data[MACD_DECISION] = macd - macd_signal
+    return data
 
 
 def on_balance_volume(data, span=12):
